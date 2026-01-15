@@ -10,7 +10,9 @@
   │   └── latest.txt       # Most recent transcription
   └── temp/                # Temp audio files (auto-cleaned)
 
-  Flow Diagram
+##  Flow Diagram
+
+#### Version 1
 
   ┌──────────────────────────────────────────────────────────────┐
   │                    voiceToVibe GUI                           │
@@ -28,6 +30,23 @@
   │   └────────────────────────────────────────────────────────┘ │
   │                                                              │
   │   [📋 Copy Again]   Saved to: prompts/latest.txt            │
+  └──────────────────────────────────────────────────────────────┘
+
+#### Version 2
+    ┌──────────────────────────────────────────────────────────────┐
+  │  Input: [ (System Default)              ▾ ] [↻]             │
+  ├──────────────────────────────────────────────────────────────┤
+  │                                                              │
+  │       [ 🎤 Record ]    [ ⏹ Stop & Transcribe ]              │
+  │                                                              │
+  │   Status: Idle                                               │
+  │                                                              │
+  │   ┌────────────────────────────────────────────────────────┐ │
+  │   │ Transcribed text appears here                          │ │
+  │   └────────────────────────────────────────────────────────┘ │
+  │                                                              │
+  │                  [📋 Copy to Clipboard]                      │
+  │            Saves to: prompts/latest.txt                      │
   └──────────────────────────────────────────────────────────────┘
 
   What Happens Under the Hood
