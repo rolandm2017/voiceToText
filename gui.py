@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading
 import os
+import numpy as np
 import config
 from recorder import Recorder
 from transcriber import Transcriber
@@ -14,12 +15,14 @@ class VoiceToVibeApp:
         self.recorder = Recorder()
         self.transcriber = Transcriber()
         self.input_devices = []
+        self._waveform_update_id = None
+        self._waveform_samples = np.array([], dtype=np.float32)
         self.setup_ui()
         self.refresh_devices()
 
     def setup_ui(self):
         self.root.title("voiceToVibe")
-        self.root.geometry("550x480")
+        self.root.geometry("550x580")
         self.root.configure(bg="#2b2b2b")
 
         # === Device selector frame ===
@@ -97,6 +100,18 @@ class VoiceToVibeApp:
         )
         self.status_label.pack(pady=5)
 
+        # === Waveform display ===
+        self.waveform_canvas = tk.Canvas(
+            self.root,
+            width=520,
+            height=80,
+            bg="#1e1e1e",
+            highlightthickness=1,
+            highlightbackground="#3a3a3a"
+        )
+        self.waveform_canvas.pack(padx=15, pady=(5, 10))
+        self._draw_waveform_baseline()
+
         # === Text output ===
         self.text_output = scrolledtext.ScrolledText(
             self.root,
@@ -161,10 +176,13 @@ class VoiceToVibeApp:
         self.device_combo.config(state=tk.DISABLED)  # Lock during recording
         self.status_var.set("🔴 Recording...")
         self.text_output.delete(1.0, tk.END)
+        self._clear_waveform()
         self.recorder.start()
+        self._start_waveform_updates()
 
     def on_stop(self):
         self.btn_stop.config(state=tk.DISABLED)
+        self._stop_waveform_updates()
         self.status_var.set("Saving audio...")
 
         wav_path = self.recorder.stop()
@@ -218,3 +236,93 @@ class VoiceToVibeApp:
             self.root.clipboard_append(text)
             self.status_var.set("📋 Copied!")
             self.root.after(2000, lambda: self.status_var.set("Idle"))
+
+    # === Waveform methods ===
+
+    def _draw_waveform_baseline(self):
+        """Draw the center line (zero amplitude) on the waveform canvas."""
+        self.waveform_canvas.delete("all")
+        w = self.waveform_canvas.winfo_reqwidth()
+        h = self.waveform_canvas.winfo_reqheight()
+        center_y = h // 2
+        self.waveform_canvas.create_line(
+            0, center_y, w, center_y,
+            fill="#3a3a3a", width=1, tags="baseline"
+        )
+
+    def _clear_waveform(self):
+        """Clear waveform and reset sample buffer."""
+        self._waveform_samples = np.array([], dtype=np.float32)
+        self._draw_waveform_baseline()
+
+    def _start_waveform_updates(self):
+        """Start the waveform update loop."""
+        self._update_waveform()
+
+    def _stop_waveform_updates(self):
+        """Stop the waveform update loop."""
+        if self._waveform_update_id is not None:
+            self.root.after_cancel(self._waveform_update_id)
+            self._waveform_update_id = None
+
+    def _update_waveform(self):
+        """Update waveform display with latest audio data."""
+        if not self.recorder.is_recording:
+            return
+
+        # Get canvas dimensions
+        w = self.waveform_canvas.winfo_reqwidth()
+        h = self.waveform_canvas.winfo_reqheight()
+        center_y = h // 2
+
+        # Collect new samples from recorder
+        if self.recorder.audio_data:
+            new_audio = np.concatenate(self.recorder.audio_data, axis=0)
+            if new_audio.ndim > 1:
+                new_audio = new_audio[:, 0]
+            self._waveform_samples = new_audio
+
+        # Clear and redraw
+        self.waveform_canvas.delete("all")
+
+        # Draw baseline
+        self.waveform_canvas.create_line(
+            0, center_y, w, center_y,
+            fill="#3a3a3a", width=1
+        )
+
+        if len(self._waveform_samples) > 0:
+            # Calculate how many samples per pixel column
+            # Show last ~3 seconds of audio (48000 samples at 16kHz)
+            display_samples = min(len(self._waveform_samples), config.SAMPLE_RATE * 3)
+            samples = self._waveform_samples[-display_samples:]
+
+            samples_per_col = max(1, len(samples) // w)
+
+            # Draw waveform using min/max envelope (DAW style)
+            for x in range(w):
+                start_idx = x * samples_per_col
+                end_idx = min(start_idx + samples_per_col, len(samples))
+
+                if start_idx >= len(samples):
+                    break
+
+                chunk = samples[start_idx:end_idx]
+                if len(chunk) == 0:
+                    continue
+
+                min_val = np.min(chunk)
+                max_val = np.max(chunk)
+
+                # Map [-1, 1] to canvas coordinates
+                y_min = int(center_y - max_val * (center_y - 2))
+                y_max = int(center_y - min_val * (center_y - 2))
+
+                # Draw vertical line from min to max
+                self.waveform_canvas.create_line(
+                    x, y_min, x, y_max,
+                    fill="#4a9f4a", width=1
+                )
+
+        # Schedule next update (~30 fps)
+        self._waveform_update_id = self.root.after(33, self._update_waveform)
