@@ -5,6 +5,7 @@ from tkinter import scrolledtext, ttk
 import threading
 import os
 import numpy as np
+import traceback
 import config
 from recorder import Recorder
 from transcriber import Transcriber
@@ -17,8 +18,11 @@ class VoiceToVibeApp:
         self.input_devices = []
         self._waveform_update_id = None
         self._waveform_samples = np.array([], dtype=np.float32)
+        self._live_transcription_id = None
+        self._last_transcribed_samples = 0
         self.setup_ui()
         self.refresh_devices()
+        self._start_model_loading()
 
     def setup_ui(self):
         self.root.title("voiceToVibe")
@@ -179,29 +183,41 @@ class VoiceToVibeApp:
         self._clear_waveform()
         self.recorder.start()
         self._start_waveform_updates()
+        self._start_live_transcription()
 
     def on_stop(self):
         self.btn_stop.config(state=tk.DISABLED)
         self._stop_waveform_updates()
-        self.status_var.set("Saving audio...")
+        self._stop_live_transcription()
+        self.status_var.set("Finalizing transcription...")
+
+        # Get audio before stopping recorder
+        final_audio = None
+        if self.recorder.audio_data:
+            final_audio = np.concatenate(self.recorder.audio_data, axis=0)
+            if final_audio.ndim > 1:
+                final_audio = final_audio[:, 0]
 
         wav_path = self.recorder.stop()
 
-        if wav_path is None:
+        if wav_path is None or final_audio is None or len(final_audio) == 0:
             self.status_var.set("No audio recorded")
             self.btn_record.config(state=tk.NORMAL)
             self.device_combo.config(state="readonly")
             return
 
-        self.status_var.set("Transcribing... (loading model if first run)")
-
-        thread = threading.Thread(target=self._transcribe_thread, args=(wav_path,))
-        thread.daemon = True
+        # Do final transcription with complete audio
+        thread = threading.Thread(
+            target=self._final_transcribe_thread,
+            args=(final_audio.copy(), wav_path),
+            daemon=True
+        )
         thread.start()
 
-    def _transcribe_thread(self, wav_path):
+    def _final_transcribe_thread(self, audio, wav_path):
+        """Final transcription with complete audio."""
         try:
-            text = self.transcriber.transcribe(wav_path)
+            text = self.transcriber.transcribe_array(audio)
             self.root.after(0, lambda: self._on_transcription_done(text))
         except Exception as e:
             self.root.after(0, lambda: self._on_transcription_error(str(e)))
@@ -326,3 +342,99 @@ class VoiceToVibeApp:
 
         # Schedule next update (~30 fps)
         self._waveform_update_id = self.root.after(33, self._update_waveform)
+
+    # === Model loading methods ===
+
+    def _start_model_loading(self):
+        """Start loading the WhisperX model in background."""
+        self.status_var.set("Loading model...")
+        self.btn_record.config(state=tk.DISABLED)
+        thread = threading.Thread(target=self._load_model_thread, daemon=True)
+        thread.start()
+
+    def _load_model_thread(self):
+        """Background thread for model loading."""
+        try:
+            self.transcriber.load_model()
+            self.root.after(0, self._on_model_loaded)
+        except Exception as e:
+            traceback.print_exc()
+            self.root.after(0, lambda: self._on_model_load_error(self._format_error(e)))
+
+    def _on_model_loaded(self):
+        """Called when model is loaded successfully."""
+        self.status_var.set("Ready")
+        self.btn_record.config(state=tk.NORMAL)
+
+    def _on_model_load_error(self, error_msg):
+        """Called when model loading fails."""
+        self.status_var.set(f"Model load failed: {error_msg}")
+
+    @staticmethod
+    def _format_error(error: Exception) -> str:
+        message = str(error).strip()
+        if message and message.lower() != "none":
+            return message
+        return f"{type(error).__name__}: {repr(error)}"
+
+    # === Live transcription methods ===
+
+    def _start_live_transcription(self):
+        """Start the live transcription loop."""
+        self._last_transcribed_samples = 0
+        self._live_transcribe()
+
+    def _stop_live_transcription(self):
+        """Stop the live transcription loop."""
+        if self._live_transcription_id is not None:
+            self.root.after_cancel(self._live_transcription_id)
+            self._live_transcription_id = None
+
+    def _live_transcribe(self):
+        """Periodically transcribe accumulated audio."""
+        if not self.recorder.is_recording:
+            return
+
+        if not self.transcriber.is_loaded:
+            # Model not ready, try again later
+            self._live_transcription_id = self.root.after(500, self._live_transcribe)
+            return
+
+        # Get current audio samples
+        if self.recorder.audio_data:
+            audio = np.concatenate(self.recorder.audio_data, axis=0)
+            if audio.ndim > 1:
+                audio = audio[:, 0]
+
+            # Only transcribe if we have enough new audio (~1.5 seconds worth)
+            min_new_samples = int(config.SAMPLE_RATE * 1.5)
+            current_samples = len(audio)
+
+            if current_samples - self._last_transcribed_samples >= min_new_samples:
+                # Transcribe in a thread to not block UI
+                thread = threading.Thread(
+                    target=self._transcribe_chunk_thread,
+                    args=(audio.copy(),),
+                    daemon=True
+                )
+                thread.start()
+                self._last_transcribed_samples = current_samples
+
+        # Schedule next check (every 500ms)
+        self._live_transcription_id = self.root.after(500, self._live_transcribe)
+
+    def _transcribe_chunk_thread(self, audio):
+        """Transcribe audio chunk in background thread."""
+        try:
+            text = self.transcriber.transcribe_array(audio)
+            self.root.after(0, lambda: self._on_live_transcription(text))
+        except Exception as e:
+            print(f"Live transcription error: {e}")
+
+    def _on_live_transcription(self, text):
+        """Update UI with live transcription result."""
+        if text:
+            self.text_output.delete(1.0, tk.END)
+            self.text_output.insert(1.0, text)
+            # Auto-scroll to end
+            self.text_output.see(tk.END)
