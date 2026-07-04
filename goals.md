@@ -1,11 +1,15 @@
 # what is the goal?
 
-To have a small GUI made in Tkiner that allows me to like,
+To prompt AI assistants with my voice instead of my keyboard, using my own
+GPU, without sending audio to anyone.
 
-Press a "Stream voice" button, to a file
+Press **Record**, talk, read the live transcription as it appears (so I can
+remember what the hell I've already covered), press **Done**, paste from the
+clipboard into Claude Code or the web UI.
 
-Speak, and then press "End stream"
+Status: built (2026-07). See README.md and ARCHITECTURE.md.
 
-And then, after I'm done speaking, i can paste the file contents into Claude Code or the web ui
-
-My goal is to prompt with my voice instead of my keyboard.
+Explicitly out of scope, by choice:
+- prebuilt binaries / installers (users can handle a venv)
+- handling CUDA/driver installation
+- global hotkeys, auto-punctuation cleanup, streaming ASR models

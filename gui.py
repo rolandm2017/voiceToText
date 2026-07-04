@@ -1,440 +1,256 @@
-# gui.py (updated)
+"""Tkinter GUI. All app state lives here, mutated only on the GUI thread.
 
+Worker threads (audio, transcriber) communicate exclusively by putting event
+tuples on self.events; _poll() drains it every 40 ms. Each recording gets a
+session id so results from a cancelled recording are ignored if they arrive
+late.
+"""
+
+import datetime
+import os
+import queue
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import scrolledtext, ttk
-import threading
-import os
-import numpy as np
-import traceback
+
+import pyperclip
+
+import audio
 import config
-from recorder import Recorder
 from transcriber import Transcriber
 
+# app states
+LOADING, READY, RECORDING, FINALIZING = "loading", "ready", "recording", "finalizing"
+
+
 class VoiceToVibeApp:
-    def __init__(self, root):
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.recorder = Recorder()
-        self.transcriber = Transcriber()
-        self.input_devices = []
-        self._waveform_update_id = None
-        self._waveform_samples = np.array([], dtype=np.float32)
-        self._live_transcription_id = None
-        self._last_transcribed_samples = 0
-        self.setup_ui()
-        self.refresh_devices()
-        self._start_model_loading()
+        self.events: queue.Queue = queue.Queue()
+        self.state = LOADING
+        self.session = 0          # bumped on every Record/Cancel; stale results ignored
+        self.pending = 0          # segments emitted but not yet transcribed
+        self.model_desc = ""
 
-    def setup_ui(self):
+        self._build_ui()
+        self.engine = audio.AudioEngine(config.VAD_MODEL_PATH)
+        self.transcriber = Transcriber(self.events.put)
+        self._set_status("Loading model… (first ever run also downloads it)")
+        self.root.after(40, self._poll)
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_ui(self):
         self.root.title("voiceToVibe")
-        self.root.geometry("550x580")
-        self.root.configure(bg="#2b2b2b")
+        self.root.minsize(520, 360)
 
-        # === Device selector frame ===
-        device_frame = tk.Frame(self.root, bg="#2b2b2b")
-        device_frame.pack(pady=(15, 5), padx=15, fill=tk.X)
-
-        device_label = tk.Label(
-            device_frame,
-            text="Input:",
-            bg="#2b2b2b",
-            fg="#aaaaaa",
-            font=("Segoe UI", 10)
-        )
-        device_label.pack(side=tk.LEFT)
-
+        top = ttk.Frame(self.root, padding=(10, 8, 10, 0))
+        top.pack(fill="x")
+        ttk.Label(top, text="Mic:").pack(side="left")
         self.device_var = tk.StringVar()
-        self.device_combo = ttk.Combobox(
-            device_frame,
-            textvariable=self.device_var,
-            state="readonly",
-            width=45,
-            font=("Segoe UI", 9)
-        )
-        self.device_combo.pack(side=tk.LEFT, padx=(10, 5))
-        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_change)
+        self.device_box = ttk.Combobox(top, textvariable=self.device_var, state="readonly")
+        self.device_box.pack(side="left", fill="x", expand=True, padx=(4, 2))
+        self.refresh_btn = ttk.Button(top, text="↻", width=3, command=self._refresh_devices)
+        self.refresh_btn.pack(side="left")
+        self.topmost_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            top, text="📌 On top", variable=self.topmost_var,
+            command=lambda: self.root.attributes("-topmost", self.topmost_var.get()),
+        ).pack(side="left", padx=(8, 0))
 
-        self.btn_refresh = tk.Button(
-            device_frame,
-            text="↻",
-            command=self.refresh_devices,
-            width=3,
-            bg="#3a3a3a",
-            fg="white",
-            font=("Segoe UI", 10)
-        )
-        self.btn_refresh.pack(side=tk.LEFT)
+        mid = ttk.Frame(self.root, padding=(10, 8))
+        mid.pack(fill="x")
+        self.record_btn = ttk.Button(mid, text="🎤 Record", command=self._on_record_done,
+                                     state="disabled")
+        self.record_btn.pack(side="left")
+        self.cancel_btn = ttk.Button(mid, text="✕ Cancel", command=self._on_cancel,
+                                     state="disabled")
+        self.cancel_btn.pack(side="left", padx=(6, 12))
+        self.level = tk.Canvas(mid, width=140, height=14, highlightthickness=1,
+                               highlightbackground="#999")
+        self.level.pack(side="left", fill="x", expand=True)
+        self._level_bar = self.level.create_rectangle(0, 0, 0, 14, fill="#bbb", width=0)
 
-        # === Button frame ===
-        btn_frame = tk.Frame(self.root, bg="#2b2b2b")
-        btn_frame.pack(pady=15)
+        self.status_var = tk.StringVar()
+        ttk.Label(self.root, textvariable=self.status_var, padding=(10, 0)).pack(fill="x")
 
-        self.btn_record = tk.Button(
-            btn_frame,
-            text="🎤 Record",
-            command=self.on_record,
-            width=15,
-            height=2,
-            bg="#4a9f4a",
-            fg="white",
-            font=("Segoe UI", 11)
-        )
-        self.btn_record.pack(side=tk.LEFT, padx=10)
+        self.text = scrolledtext.ScrolledText(self.root, wrap="word", height=10,
+                                              font=("Segoe UI", 11), undo=True)
+        self.text.pack(fill="both", expand=True, padx=10, pady=8)
 
-        self.btn_stop = tk.Button(
-            btn_frame,
-            text="⏹ Stop & Transcribe",
-            command=self.on_stop,
-            width=18,
-            height=2,
-            bg="#cf6a4c",
-            fg="white",
-            font=("Segoe UI", 11),
-            state=tk.DISABLED
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=10)
+        bottom = ttk.Frame(self.root, padding=(10, 0, 10, 10))
+        bottom.pack(fill="x")
+        self.autocopy_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bottom, text="Autocopy to clipboard",
+                        variable=self.autocopy_var).pack(side="left")
+        ttk.Button(bottom, text="📋 Copy", command=self._copy).pack(side="right")
+        ttk.Button(bottom, text="📁 Open folder", command=self._open_folder).pack(
+            side="right", padx=(0, 6))
 
-        # === Status label ===
-        self.status_var = tk.StringVar(value="Idle")
-        self.status_label = tk.Label(
-            self.root,
-            textvariable=self.status_var,
-            bg="#2b2b2b",
-            fg="#aaaaaa",
-            font=("Segoe UI", 10)
-        )
-        self.status_label.pack(pady=5)
+        self.root.bind("<Control-Shift-D>", lambda e: self._on_cancel())
+        self.root.bind("<Control-Shift-d>", lambda e: self._on_cancel())
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._refresh_devices()
 
-        # === Waveform display ===
-        self.waveform_canvas = tk.Canvas(
-            self.root,
-            width=520,
-            height=80,
-            bg="#1e1e1e",
-            highlightthickness=1,
-            highlightbackground="#3a3a3a"
-        )
-        self.waveform_canvas.pack(padx=15, pady=(5, 10))
-        self._draw_waveform_baseline()
+    def _on_close(self):
+        if self.state in (RECORDING, FINALIZING):
+            self.engine.stop(flush=False)
+        self.root.destroy()
 
-        # === Text output ===
-        self.text_output = scrolledtext.ScrolledText(
-            self.root,
-            wrap=tk.WORD,
-            width=60,
-            height=12,
-            font=("Consolas", 11),
-            bg="#1e1e1e",
-            fg="#d4d4d4",
-            insertbackground="white"
-        )
-        self.text_output.pack(padx=15, pady=10)
+    def _refresh_devices(self):
+        try:
+            audio.refresh_devices()
+        except Exception:
+            pass
+        self.devices = audio.list_input_devices()
+        self.device_box["values"] = [name for _idx, name in self.devices]
+        if not self.device_var.get() or self.device_var.get() not in self.device_box["values"]:
+            self.device_box.current(0)
 
-        # === Copy button ===
-        self.btn_copy = tk.Button(
-            self.root,
-            text="📋 Copy to Clipboard",
-            command=self.on_copy,
-            width=20,
-            bg="#3a3a3a",
-            fg="white",
-            font=("Segoe UI", 10)
-        )
-        self.btn_copy.pack(pady=5)
+    def _selected_device(self):
+        i = self.device_box.current()
+        return self.devices[i][0] if 0 <= i < len(self.devices) else None
 
-        # === File path label ===
-        self.path_label = tk.Label(
-            self.root,
-            text=f"Saves to: {config.OUTPUT_DIR}/{config.LATEST_FILE}",
-            bg="#2b2b2b",
-            fg="#666666",
-            font=("Segoe UI", 9)
-        )
-        self.path_label.pack(pady=5)
+    def _set_status(self, msg: str):
+        self.status_var.set(msg)
 
-    def refresh_devices(self):
-        """Refresh the list of input devices."""
-        self.input_devices = Recorder.get_input_devices()
+    def _set_level(self, rms: float, is_speech: bool):
+        width = self.level.winfo_width() or 140
+        frac = min(1.0, rms * 8.0)
+        self.level.coords(self._level_bar, 0, 0, int(width * frac), 14)
+        self.level.itemconfig(self._level_bar, fill="#3c3" if is_speech else "#bbb")
 
-        # Build display list with "Default" option first
-        display_names = ["(System Default)"]
-        display_names += [name for _, name in self.input_devices]
+    # ----------------------------------------------------------- actions
 
-        self.device_combo['values'] = display_names
-        self.device_combo.current(0)  # Select default
-        self.recorder.set_device(None)
+    def _on_record_done(self):
+        if self.state == READY:
+            self.session += 1
+            self.pending = 0
+            self.text.delete("1.0", "end")
+            try:
+                self.engine.start(self._selected_device(), self.events.put)
+            except Exception as e:
+                self._set_status(f"Mic error: {e}")
+                return
+            self.state = RECORDING
+            self.record_btn.config(text="⏹ Done")
+            self.cancel_btn.config(state="normal")
+            self.device_box.config(state="disabled")
+            self.refresh_btn.config(state="disabled")
+            self._set_status("Recording — pause briefly and text will appear")
+        elif self.state == RECORDING:
+            self.engine.stop(flush=True)   # blocks until the final segment event is queued
+            self.state = FINALIZING
+            self.record_btn.config(state="disabled")
+            self.cancel_btn.config(state="disabled")
+            self._drain_events()           # pick up that final segment now
+            if self.pending == 0:
+                self._finalize()
+            else:
+                self._set_status("Finishing transcription…")
 
-    def on_device_change(self, event=None):
-        """Handle device selection change."""
-        idx = self.device_combo.current()
-        if idx == 0:
-            # System default
-            self.recorder.set_device(None)
+    def _on_cancel(self, *_):
+        if self.state not in (RECORDING, FINALIZING):
+            return
+        self.engine.stop(flush=False)
+        self.session += 1                  # orphan any in-flight results
+        self.pending = 0
+        self.text.delete("1.0", "end")
+        self._to_ready("Cancelled — nothing saved")
+
+    def _finalize(self):
+        text = self.text.get("1.0", "end-1c").strip()
+        if not text:
+            self._to_ready("Nothing transcribed")
+            return
+        os.makedirs(config.PROMPTS_DIR, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        path = os.path.join(config.PROMPTS_DIR, f"{stamp}.txt")
+        for p in (path, os.path.join(config.PROMPTS_DIR, config.LATEST_FILE)):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+        copied = ""
+        if self.autocopy_var.get():
+            pyperclip.copy(text)
+            copied = " · copied to clipboard ✓"
+        self._to_ready(f"Saved {os.path.basename(path)}{copied}")
+
+    def _to_ready(self, msg: str):
+        self.state = READY
+        self.record_btn.config(text="🎤 Record", state="normal")
+        self.cancel_btn.config(state="disabled")
+        self.device_box.config(state="readonly")
+        self.refresh_btn.config(state="normal")
+        self._set_level(0.0, False)
+        self._set_status(msg)
+
+    def _copy(self):
+        text = self.text.get("1.0", "end-1c").strip()
+        if text:
+            pyperclip.copy(text)
+            self._set_status("Copied to clipboard ✓")
+
+    def _open_folder(self):
+        folder = os.path.abspath(config.PROMPTS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(folder)
         else:
-            # Specific device (idx-1 because of "Default" offset)
-            device_id, device_name = self.input_devices[idx - 1]
-            self.recorder.set_device(device_id)
+            subprocess.Popen(["xdg-open", folder])
 
-    def on_record(self):
-        self.btn_record.config(state=tk.DISABLED)
-        self.btn_stop.config(state=tk.NORMAL)
-        self.device_combo.config(state=tk.DISABLED)  # Lock during recording
-        self.status_var.set("🔴 Recording...")
-        self.text_output.delete(1.0, tk.END)
-        self._clear_waveform()
-        self.recorder.start()
-        self._start_waveform_updates()
-        self._start_live_transcription()
+    # ------------------------------------------------------------ events
 
-    def on_stop(self):
-        self.btn_stop.config(state=tk.DISABLED)
-        self._stop_waveform_updates()
-        self._stop_live_transcription()
-        self.status_var.set("Finalizing transcription...")
+    def _poll(self):
+        self._drain_events()
+        self.root.after(40, self._poll)
 
-        # Get audio before stopping recorder
-        final_audio = None
-        if self.recorder.audio_data:
-            final_audio = np.concatenate(self.recorder.audio_data, axis=0)
-            if final_audio.ndim > 1:
-                final_audio = final_audio[:, 0]
+    def _drain_events(self):
+        while True:
+            try:
+                ev = self.events.get_nowait()
+            except queue.Empty:
+                return
+            self._handle(ev)
 
-        wav_path = self.recorder.stop()
+    def _handle(self, ev):
+        kind = ev[0]
+        if kind == "level":
+            if self.state == RECORDING:
+                self._set_level(ev[1], ev[2])
+        elif kind == "segment":
+            if self.state not in (RECORDING, FINALIZING):
+                return  # cancelled while segment was in flight
+            self.pending += 1
+            tail = self.text.get("1.0", "end-1c")[-200:].strip() or None
+            self.transcriber.submit(ev[1], self.session, tail)
+        elif kind == "segment_text":
+            _, session_id, text = ev
+            if session_id != self.session:
+                return  # from a cancelled recording
+            self.pending -= 1
+            if text:
+                if self.text.get("1.0", "end-1c").strip():
+                    self.text.insert("end", config.SEGMENT_JOIN)
+                self.text.insert("end", text)
+                self.text.see("end")
+            if self.state == FINALIZING and self.pending <= 0:
+                self._finalize()
+        elif kind == "model_ready":
+            self.model_desc = ev[1]
+            if self.state == LOADING:
+                self._to_ready(f"Ready · {self.model_desc}")
+        elif kind == "model_error":
+            self._set_status(ev[1])
+            if self.state == LOADING:
+                self.record_btn.config(state="disabled")
+        elif kind == "audio_error":
+            self._set_status(f"Audio error: {ev[1]}")
+            if self.state == RECORDING:
+                self._on_cancel()
 
-        if wav_path is None or final_audio is None or len(final_audio) == 0:
-            self.status_var.set("No audio recorded")
-            self.btn_record.config(state=tk.NORMAL)
-            self.device_combo.config(state="readonly")
-            return
 
-        # Do final transcription with complete audio
-        thread = threading.Thread(
-            target=self._final_transcribe_thread,
-            args=(final_audio.copy(), wav_path),
-            daemon=True
-        )
-        thread.start()
-
-    def _final_transcribe_thread(self, audio, wav_path):
-        """Final transcription with complete audio."""
-        try:
-            text = self.transcriber.transcribe_array(audio)
-            self.root.after(0, lambda: self._on_transcription_done(text))
-        except Exception as e:
-            self.root.after(0, lambda: self._on_transcription_error(str(e)))
-
-    def _on_transcription_done(self, text):
-        self.text_output.delete(1.0, tk.END)
-        self.text_output.insert(1.0, text)
-
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-
-        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-        output_path = os.path.join(config.OUTPUT_DIR, config.LATEST_FILE)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(text)
-
-        self.status_var.set("✓ Done - copied to clipboard")
-        self.btn_record.config(state=tk.NORMAL)
-        self.device_combo.config(state="readonly")  # Unlock
-
-    def _on_transcription_error(self, error_msg):
-        self.text_output.delete(1.0, tk.END)
-        self.text_output.insert(1.0, f"Error: {error_msg}")
-        self.status_var.set("Error during transcription")
-        self.btn_record.config(state=tk.NORMAL)
-        self.device_combo.config(state="readonly")
-
-    def on_copy(self):
-        text = self.text_output.get(1.0, tk.END).strip()
-        if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.status_var.set("📋 Copied!")
-            self.root.after(2000, lambda: self.status_var.set("Idle"))
-
-    # === Waveform methods ===
-
-    def _draw_waveform_baseline(self):
-        """Draw the center line (zero amplitude) on the waveform canvas."""
-        self.waveform_canvas.delete("all")
-        w = self.waveform_canvas.winfo_reqwidth()
-        h = self.waveform_canvas.winfo_reqheight()
-        center_y = h // 2
-        self.waveform_canvas.create_line(
-            0, center_y, w, center_y,
-            fill="#3a3a3a", width=1, tags="baseline"
-        )
-
-    def _clear_waveform(self):
-        """Clear waveform and reset sample buffer."""
-        self._waveform_samples = np.array([], dtype=np.float32)
-        self._draw_waveform_baseline()
-
-    def _start_waveform_updates(self):
-        """Start the waveform update loop."""
-        self._update_waveform()
-
-    def _stop_waveform_updates(self):
-        """Stop the waveform update loop."""
-        if self._waveform_update_id is not None:
-            self.root.after_cancel(self._waveform_update_id)
-            self._waveform_update_id = None
-
-    def _update_waveform(self):
-        """Update waveform display with latest audio data."""
-        if not self.recorder.is_recording:
-            return
-
-        # Get canvas dimensions
-        w = self.waveform_canvas.winfo_reqwidth()
-        h = self.waveform_canvas.winfo_reqheight()
-        center_y = h // 2
-
-        # Collect new samples from recorder
-        if self.recorder.audio_data:
-            new_audio = np.concatenate(self.recorder.audio_data, axis=0)
-            if new_audio.ndim > 1:
-                new_audio = new_audio[:, 0]
-            self._waveform_samples = new_audio
-
-        # Clear and redraw
-        self.waveform_canvas.delete("all")
-
-        # Draw baseline
-        self.waveform_canvas.create_line(
-            0, center_y, w, center_y,
-            fill="#3a3a3a", width=1
-        )
-
-        if len(self._waveform_samples) > 0:
-            # Calculate how many samples per pixel column
-            # Show last ~3 seconds of audio (48000 samples at 16kHz)
-            display_samples = min(len(self._waveform_samples), config.SAMPLE_RATE * 3)
-            samples = self._waveform_samples[-display_samples:]
-
-            samples_per_col = max(1, len(samples) // w)
-
-            # Draw waveform using min/max envelope (DAW style)
-            for x in range(w):
-                start_idx = x * samples_per_col
-                end_idx = min(start_idx + samples_per_col, len(samples))
-
-                if start_idx >= len(samples):
-                    break
-
-                chunk = samples[start_idx:end_idx]
-                if len(chunk) == 0:
-                    continue
-
-                min_val = np.min(chunk)
-                max_val = np.max(chunk)
-
-                # Map [-1, 1] to canvas coordinates
-                y_min = int(center_y - max_val * (center_y - 2))
-                y_max = int(center_y - min_val * (center_y - 2))
-
-                # Draw vertical line from min to max
-                self.waveform_canvas.create_line(
-                    x, y_min, x, y_max,
-                    fill="#4a9f4a", width=1
-                )
-
-        # Schedule next update (~30 fps)
-        self._waveform_update_id = self.root.after(33, self._update_waveform)
-
-    # === Model loading methods ===
-
-    def _start_model_loading(self):
-        """Start loading the WhisperX model in background."""
-        self.status_var.set("Loading model...")
-        self.btn_record.config(state=tk.DISABLED)
-        thread = threading.Thread(target=self._load_model_thread, daemon=True)
-        thread.start()
-
-    def _load_model_thread(self):
-        """Background thread for model loading."""
-        try:
-            self.transcriber.load_model()
-            self.root.after(0, self._on_model_loaded)
-        except Exception as e:
-            traceback.print_exc()
-            self.root.after(0, lambda: self._on_model_load_error(self._format_error(e)))
-
-    def _on_model_loaded(self):
-        """Called when model is loaded successfully."""
-        self.status_var.set("Ready")
-        self.btn_record.config(state=tk.NORMAL)
-
-    def _on_model_load_error(self, error_msg):
-        """Called when model loading fails."""
-        self.status_var.set(f"Model load failed: {error_msg}")
-
-    @staticmethod
-    def _format_error(error: Exception) -> str:
-        message = str(error).strip()
-        if message and message.lower() != "none":
-            return message
-        return f"{type(error).__name__}: {repr(error)}"
-
-    # === Live transcription methods ===
-
-    def _start_live_transcription(self):
-        """Start the live transcription loop."""
-        self._last_transcribed_samples = 0
-        self._live_transcribe()
-
-    def _stop_live_transcription(self):
-        """Stop the live transcription loop."""
-        if self._live_transcription_id is not None:
-            self.root.after_cancel(self._live_transcription_id)
-            self._live_transcription_id = None
-
-    def _live_transcribe(self):
-        """Periodically transcribe accumulated audio."""
-        if not self.recorder.is_recording:
-            return
-
-        if not self.transcriber.is_loaded:
-            # Model not ready, try again later
-            self._live_transcription_id = self.root.after(500, self._live_transcribe)
-            return
-
-        # Get current audio samples
-        if self.recorder.audio_data:
-            audio = np.concatenate(self.recorder.audio_data, axis=0)
-            if audio.ndim > 1:
-                audio = audio[:, 0]
-
-            # Only transcribe if we have enough new audio (~1.5 seconds worth)
-            min_new_samples = int(config.SAMPLE_RATE * 1.5)
-            current_samples = len(audio)
-
-            if current_samples - self._last_transcribed_samples >= min_new_samples:
-                # Transcribe in a thread to not block UI
-                thread = threading.Thread(
-                    target=self._transcribe_chunk_thread,
-                    args=(audio.copy(),),
-                    daemon=True
-                )
-                thread.start()
-                self._last_transcribed_samples = current_samples
-
-        # Schedule next check (every 500ms)
-        self._live_transcription_id = self.root.after(500, self._live_transcribe)
-
-    def _transcribe_chunk_thread(self, audio):
-        """Transcribe audio chunk in background thread."""
-        try:
-            text = self.transcriber.transcribe_array(audio)
-            self.root.after(0, lambda: self._on_live_transcription(text))
-        except Exception as e:
-            print(f"Live transcription error: {e}")
-
-    def _on_live_transcription(self, text):
-        """Update UI with live transcription result."""
-        if text:
-            self.text_output.delete(1.0, tk.END)
-            self.text_output.insert(1.0, text)
-            # Auto-scroll to end
-            self.text_output.see(tk.END)
+def run():
+    root = tk.Tk()
+    VoiceToVibeApp(root)
+    root.mainloop()

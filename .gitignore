@@ -1,8 +1,8 @@
 .venv
-
-__pycache__
-
-__pycache__/**/*
-
-
+__pycache__/
+*.pyc
+prompts/
+*.egg-info/
 *.wav
+
+assets/*

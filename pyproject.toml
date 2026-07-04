@@ -1,0 +1,22 @@
+[project]
+name = "voicetovibe"
+version = "1.0.0"
+description = "Local GPU voice-to-text for prompting AI assistants. Speak, read live transcription, click Done, paste."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "sounddevice>=0.4.6",
+    "faster-whisper>=1.0.0",
+    "onnxruntime>=1.16",
+    "numpy>=1.24",
+    "pyperclip>=1.8",
+]
+
+[project.optional-dependencies]
+# GPU runtime libs as pip wheels — saves installing the CUDA toolkit by hand.
+# You still need a normal NVIDIA driver.
+cuda = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9"]
+
+[tool.setuptools]
+py-modules = ["main", "gui", "audio", "transcriber", "config"]

@@ -4,46 +4,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-voiceToVibe is a voice-to-text transcription tool with a Tkinter GUI. The goal is to enable prompting AI assistants (like Claude) with voice instead of keyboard. Users record audio via microphone, the audio is transcribed using WhisperX, and the text is automatically copied to clipboard.
+voiceToVibe is a local voice-to-text tool for prompting AI assistants by
+voice. The user records from a mic, speech is transcribed *live* (segment by
+segment at natural pauses) using faster-whisper large-v3 on the local GPU,
+and on Done the text is saved to `prompts/` and autocopied to the clipboard.
+No audio is ever written to disk; nothing leaves the machine.
 
-## Running the Application
+## Running
 
 ```bash
-python main.py
+python main.py                 # the app
+python audio.py                # 10s mic + VAD smoke test (no GUI, no model)
+python transcriber.py x.wav    # model-load + transcription smoke test
 ```
+
+The venv is Windows-side (`.venv/Scripts/python.exe`); Claude Code runs in
+WSL and cannot use the mic/GUI/CUDA — ask the user to run tests.
 
 ## Dependencies
 
-Requires a virtual environment with WhisperX and CUDA support:
-```bash
-pip install sounddevice scipy whisperx
-```
+`pip install -e .` (see pyproject.toml): sounddevice, faster-whisper,
+onnxruntime, numpy, pyperclip. No PyTorch. CUDA/cuDNN runtime setup is the
+user's responsibility.
 
-Note: tkinter is built into Python on Windows. WhisperX requires PyTorch with CUDA for GPU acceleration.
+## Architecture (see ARCHITECTURE.md for the full picture)
 
-## Architecture
+- `main.py` — entry point
+- `gui.py` — Tkinter app; **all state lives here and is mutated only on the
+  GUI thread**, fed by an event queue drained via `root.after`
+- `audio.py` — mic capture (sounddevice) + Silero VAD segmentation; emits
+  in-memory float32 segments at pause boundaries (worker thread)
+- `transcriber.py` — faster-whisper wrapper; background model load, job
+  queue (worker thread)
+- `config.py` — all tunables (model, device, pause thresholds, paths)
+- `assets/silero_vad.onnx` — vendored Silero VAD v5 model (MIT)
 
-The application follows a simple flow: Record → Save WAV → Transcribe → Output to clipboard/file.
-
-**Core modules:**
-- `main.py` - Entry point, creates directories and launches GUI
-- `gui.py` - Tkinter interface with VoiceToVibeApp class handling UI state and threading
-- `recorder.py` - Microphone capture using sounddevice, saves to temp/recording.wav
-- `transcriber.py` - WhisperX wrapper with lazy model loading (model stays cached after first load)
-- `config.py` - All settings: model size, device (cuda/cpu), audio params, paths
-
-**Data flow:**
-1. sounddevice captures audio at 16kHz mono
-2. Audio saved as WAV to `temp/` directory
-3. WhisperX transcribes (first run loads model ~10-15s, subsequent runs use cache)
-4. Output goes to: GUI text box, clipboard, and `prompts/latest.txt`
-
-**Threading:** Transcription runs in a daemon thread to keep UI responsive. Results are passed back via `root.after()`.
+Key invariants to preserve when editing:
+- Worker threads never touch Tk; they only `emit(event_tuple)`.
+- The PortAudio callback only enqueues samples.
+- Cancellation is by session id — never by interrupting workers.
+- `AudioEngine.stop()` must keep its guarantee: the flushed final segment is
+  in the event queue before it returns.
 
 ## Configuration
 
-Edit `config.py` to change:
-- `WHISPER_MODEL` - Model size (default: "large-v3")
-- `DEVICE` - "cuda" or "cpu"
-- `COMPUTE_TYPE` - "float16" for GPU, "int8" for CPU
-- `CHUNK_SIZE` / `BATCH_SIZE` - WhisperX processing parameters
+Edit `config.py`: `WHISPER_MODEL` (large-v3 default), `DEVICE`
+("auto"/"cuda"/"cpu"), `PAUSE_MS` (silence that finalizes a segment),
+`MAX_SEGMENT_S` (monologue force-cut), VAD thresholds, paths.

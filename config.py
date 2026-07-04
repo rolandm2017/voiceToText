@@ -1,20 +1,31 @@
 # voiceToVibe configuration
 
-WHISPER_MODEL = "large-v3"
+# --- Transcription ---
+WHISPER_MODEL = "large-v3"   # any faster-whisper model name, e.g. "medium", "distil-large-v3"
 LANGUAGE = "en"
-DEVICE = "cuda"  # or "cpu"
-COMPUTE_TYPE = "float16"  # float16 for GPU, int8 for CPU
+DEVICE = "auto"              # "auto" tries cuda then falls back to cpu; or force "cuda"/"cpu"
+BEAM_SIZE = 5
 
-# Audio settings
-SAMPLE_RATE = 16000
-CHANNELS = 1
+# --- Audio ---
+SAMPLE_RATE = 16000          # what VAD and whisper consume; mic is resampled if needed
+VAD_FRAME = 512              # samples per VAD window (32 ms @ 16 kHz) — fixed by Silero v5
 
-# WhisperX settings (from your working command)
-CHUNK_SIZE = 8
-BATCH_SIZE = 8
-CONDITION_ON_PREVIOUS_TEXT = True
+# --- Segmentation (the "live" feel) ---
+SPEECH_START_PROB = 0.50     # VAD prob above this = speech
+SPEECH_KEEP_PROB = 0.35      # hysteresis: stay "in speech" above this
+PAUSE_MS = 800               # this much silence finalizes a segment
+MIN_SPEECH_MS = 300          # segments with less actual speech are dropped (kills "Thank you." hallucinations)
+MAX_SEGMENT_S = 30           # force-cut monologues so text keeps appearing
+PRE_ROLL_MS = 300            # audio kept from just before speech onset (avoids clipped first syllables)
+KEEP_TRAIL_MS = 200          # trailing silence kept on each segment
 
-# Paths
-OUTPUT_DIR = "./prompts"
-TEMP_DIR = "./temp"
+# --- Output ---
+PROMPTS_DIR = "prompts"
 LATEST_FILE = "latest.txt"
+SEGMENT_JOIN = " "           # how finalized segments are joined in the text box
+
+# --- Paths ---
+VAD_MODEL_PATH = "assets/silero_vad.onnx"
+VAD_MODEL_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+)
