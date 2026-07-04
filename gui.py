@@ -66,7 +66,9 @@ class VoiceToVibeApp:
         self.record_btn.pack(side="left")
         self.cancel_btn = ttk.Button(mid, text="✕ Cancel", command=self._on_cancel,
                                      state="disabled")
-        self.cancel_btn.pack(side="left", padx=(6, 12))
+        self.cancel_btn.pack(side="left", padx=(6, 6))
+        ttk.Button(mid, text="¶ Paragraph (Ctrl+Enter)",
+                   command=self._insert_paragraph).pack(side="left", padx=(0, 12))
         self.level = tk.Canvas(mid, width=140, height=14, highlightthickness=1,
                                highlightbackground="#999")
         self.level.pack(side="left", fill="x", expand=True)
@@ -90,6 +92,7 @@ class VoiceToVibeApp:
 
         self.root.bind("<Control-Shift-D>", lambda e: self._on_cancel())
         self.root.bind("<Control-Shift-d>", lambda e: self._on_cancel())
+        self.root.bind("<Control-Return>", self._insert_paragraph)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_devices()
 
@@ -185,6 +188,13 @@ class VoiceToVibeApp:
         self._set_level(0.0, False)
         self._set_status(msg)
 
+    def _insert_paragraph(self, *_):
+        """Start a new paragraph at the end of the transcript (works while
+        recording: the next segment lands on the fresh line)."""
+        self.text.insert("end", "\n\n")
+        self.text.see("end")
+        return "break"  # keep Ctrl+Enter from also inserting a newline at the cursor
+
     def _copy(self):
         text = self.text.get("1.0", "end-1c").strip()
         if text:
@@ -230,7 +240,8 @@ class VoiceToVibeApp:
                 return  # from a cancelled recording
             self.pending -= 1
             if text:
-                if self.text.get("1.0", "end-1c").strip():
+                current = self.text.get("1.0", "end-1c")
+                if current.strip() and not current[-1].isspace():
                     self.text.insert("end", config.SEGMENT_JOIN)
                 self.text.insert("end", text)
                 self.text.see("end")

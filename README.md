@@ -56,8 +56,9 @@ Record button enables when the model is ready (~10–15 s on later launches).
 4. Paste. Repeat.
 
 The text box is editable — trim your rambles before clicking Done if you
-care. **✕ Cancel** (or `Ctrl+Shift+D`) discards the current recording.
-Audio is never written to disk.
+care. **¶ Paragraph** (or `Ctrl+Enter`) starts a new paragraph, so the next
+thing you say lands on a fresh line. **✕ Cancel** (or `Ctrl+Shift+D`)
+discards the current recording. Audio is never written to disk.
 
 ## Configuration
 
