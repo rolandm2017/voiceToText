@@ -1,4 +1,4 @@
-# voiceToVibe
+# voiceToText
 
 Local, GPU-powered voice-to-text for prompting AI assistants. Speak into your
 mic, watch the transcription appear live as you talk, click **Done**, and the
@@ -9,7 +9,7 @@ Speaking is much faster than typing. That's the whole pitch.
 
 ## How the "live" part works
 
-Whisper models are batch, not streaming. voiceToVibe gets a live feel without
+Whisper models are batch, not streaming. voiceToText gets a live feel without
 re-transcription hacks: a local VAD (Silero) watches the mic, and every time
 you pause naturally (~0.8 s of silence), that chunk of speech is transcribed
 with Whisper **large-v3** and appended to the text box. You can always read
@@ -32,8 +32,8 @@ PyTorch is **not** required — transcription runs on
 ## Install & run
 
 ```bash
-git clone https://github.com/<you>/voiceToVibe
-cd voiceToVibe
+git clone https://github.com/<you>/voiceToText
+cd voiceToText
 python -m venv .venv          # or: uv venv
 .venv\Scripts\activate        # Windows; source .venv/bin/activate elsewhere
 pip install -e ".[cuda]"      # or: uv pip install -e ".[cuda]"
