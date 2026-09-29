@@ -1,5 +1,5 @@
 [project]
-name = "voicetovibe"
+name = "voicetotext"
 version = "1.0.0"
 description = "Local GPU voice-to-text for prompting AI assistants. Speak, read live transcription, click Done, paste."
 readme = "README.md"
@@ -7,7 +7,8 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "sounddevice>=0.4.6",
-    "faster-whisper>=1.0.0",
+    "faster-whisper>=1.0.0; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "onnxruntime>=1.16",
     "numpy>=1.24",
     "pyperclip>=1.8",

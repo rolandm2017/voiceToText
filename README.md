@@ -25,6 +25,12 @@ back what you've said so far — text is final once it appears, never revised.
   can be pip-installed via the `[cuda]` extra below — no CUDA toolkit
   install needed.
 
+- **Or a Mac with Apple Silicon (M1 or later).** There, Whisper runs on the
+  GPU via Metal using [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)
+  (same OpenAI Whisper weights, converted for MLX), chosen automatically. No
+  NVIDIA pieces are needed. Note: mlx-whisper decodes greedily, so
+  `BEAM_SIZE` is ignored on Mac.
+
 PyTorch is **not** required — transcription runs on
 [CTranslate2](https://github.com/OpenNMT/CTranslate2) via
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
@@ -40,6 +46,17 @@ pip install -e ".[cuda]"      # or: uv pip install -e ".[cuda]"
                               # CPU-only machine? plain: pip install -e .
 python main.py
 ```
+
+On macOS (Apple Silicon):
+
+```bash
+uv venv --python 3.12 .venv   # system python3 on macOS is too old
+uv pip install --python .venv/bin/python -e .
+.venv/bin/python main.py
+```
+
+The first time you press Record, macOS asks whether your terminal may use the
+microphone. Allow it (System Settings → Privacy & Security → Microphone).
 
 First launch downloads the `large-v3` weights (~3 GB, one time) and then
 loads the model in the background — the window opens immediately and the

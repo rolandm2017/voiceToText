@@ -1,4 +1,4 @@
-"""voiceToVibe entry point: python main.py"""
+"""voiceToText entry point: python main.py"""
 
 import os
 import urllib.request

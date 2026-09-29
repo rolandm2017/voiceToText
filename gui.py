@@ -20,11 +20,13 @@ import audio
 import config
 from transcriber import Transcriber
 
+_TEXT_FONT = ("Helvetica Neue", 14) if sys.platform == "darwin" else ("Segoe UI", 11)
+
 # app states
 LOADING, READY, RECORDING, FINALIZING = "loading", "ready", "recording", "finalizing"
 
 
-class VoiceToVibeApp:
+class VoiceToTextApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.events: queue.Queue = queue.Queue()
@@ -42,7 +44,7 @@ class VoiceToVibeApp:
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
-        self.root.title("voiceToVibe")
+        self.root.title("voiceToText")
         self.root.minsize(520, 360)
 
         top = ttk.Frame(self.root, padding=(10, 8, 10, 0))
@@ -78,7 +80,7 @@ class VoiceToVibeApp:
         ttk.Label(self.root, textvariable=self.status_var, padding=(10, 0)).pack(fill="x")
 
         self.text = scrolledtext.ScrolledText(self.root, wrap="word", height=10,
-                                              font=("Segoe UI", 11), undo=True)
+                                              font=_TEXT_FONT, undo=True)
         self.text.pack(fill="both", expand=True, padx=10, pady=8)
 
         bottom = ttk.Frame(self.root, padding=(10, 0, 10, 10))
@@ -93,6 +95,10 @@ class VoiceToVibeApp:
         self.root.bind("<Control-Shift-D>", lambda e: self._on_cancel())
         self.root.bind("<Control-Shift-d>", lambda e: self._on_cancel())
         self.root.bind("<Control-Return>", self._insert_paragraph)
+        if sys.platform == "darwin":  # Mac users reach for Cmd, not Ctrl
+            self.root.bind("<Command-Shift-D>", lambda e: self._on_cancel())
+            self.root.bind("<Command-Shift-d>", lambda e: self._on_cancel())
+            self.root.bind("<Command-Return>", self._insert_paragraph)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_devices()
 
@@ -206,6 +212,8 @@ class VoiceToVibeApp:
         os.makedirs(folder, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
         else:
             subprocess.Popen(["xdg-open", folder])
 
@@ -263,5 +271,5 @@ class VoiceToVibeApp:
 
 def run():
     root = tk.Tk()
-    VoiceToVibeApp(root)
+    VoiceToTextApp(root)
     root.mainloop()

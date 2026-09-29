@@ -1,7 +1,7 @@
 # Architecture
 
 ```
-voiceToVibe/
+voiceToText/
 ├── main.py            # entry point: dirs, VAD model check, launch GUI
 ├── gui.py             # Tkinter app — ALL state lives here, on the GUI thread
 ├── audio.py           # mic capture + Silero VAD segmenter (worker thread)

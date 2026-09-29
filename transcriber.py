@@ -1,4 +1,4 @@
-"""faster-whisper wrapper: background model load + segment worker thread.
+"""Whisper wrapper (faster-whisper on CUDA/CPU, mlx-whisper on Apple Silicon): background model load + segment worker thread.
 
 Results are posted as event tuples via the `emit` callable:
     ("model_ready", "large-v3 on cuda (float16)")
@@ -7,6 +7,7 @@ Results are posted as event tuples via the `emit` callable:
 """
 
 import os
+import platform
 import queue
 import sys
 import threading
@@ -29,6 +30,57 @@ def _add_nvidia_dll_dirs():
             os.add_dll_directory(str(bin_dir))
 
 
+def _use_mlx():
+    """Apple Silicon: run Whisper on the Metal GPU via MLX (faster-whisper's
+    CTranslate2 backend has no Metal support, so it would be CPU-only)."""
+    if config.DEVICE == "cpu":
+        return False
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def _mlx_repo():
+    return config.MLX_MODEL or f"mlx-community/whisper-{config.WHISPER_MODEL}-mlx"
+
+
+class _MlxModel:
+    """Adapts mlx_whisper to the one-call interface the worker loop uses."""
+
+    def __init__(self):
+        import mlx_whisper  # slow import, keep off the GUI thread
+        self._mlx_whisper = mlx_whisper
+        self.repo = _mlx_repo()
+
+    def transcribe(self, audio, prompt_tail=None):
+        # mlx_whisper has no beam search; greedy decoding is its only mode
+        result = self._mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self.repo,
+            language=config.LANGUAGE,
+            initial_prompt=prompt_tail or None,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        return result["text"].strip()
+
+
+class _FasterWhisperModel:
+    def __init__(self, device, compute_type):
+        from faster_whisper import WhisperModel  # slow import, keep off the GUI thread
+        self._model = WhisperModel(config.WHISPER_MODEL, device=device,
+                                   compute_type=compute_type)
+
+    def transcribe(self, audio, prompt_tail=None):
+        segments, _info = self._model.transcribe(
+            audio,
+            language=config.LANGUAGE,
+            beam_size=config.BEAM_SIZE,
+            initial_prompt=prompt_tail or None,
+            vad_filter=False,  # VAD already happened upstream
+            without_timestamps=True,
+        )
+        return " ".join(s.text.strip() for s in segments).strip()
+
+
 class Transcriber:
     def __init__(self, emit):
         self.emit = emit
@@ -44,10 +96,11 @@ class Transcriber:
 
     def _load_then_work(self):
         _add_nvidia_dll_dirs()
-        from faster_whisper import WhisperModel  # slow import, keep off the GUI thread
 
         attempts = []
-        if config.DEVICE in ("auto", "cuda"):
+        if _use_mlx():
+            attempts.append(("metal", "mlx"))
+        elif config.DEVICE in ("auto", "cuda"):
             attempts.append(("cuda", "float16"))
         if config.DEVICE in ("auto", "cpu"):
             attempts.append(("cpu", "int8"))
@@ -55,12 +108,12 @@ class Transcriber:
         error = None
         for device, compute_type in attempts:
             try:
-                self.model = WhisperModel(
-                    config.WHISPER_MODEL, device=device, compute_type=compute_type
-                )
-                # force weight load / CUDA context now, not on the first real segment
-                list(self.model.transcribe(np.zeros(1600, dtype=np.float32),
-                                           language=config.LANGUAGE)[0])
+                if device == "metal":
+                    self.model = _MlxModel()
+                else:
+                    self.model = _FasterWhisperModel(device, compute_type)
+                # force weight load / GPU init now, not on the first real segment
+                self.model.transcribe(np.zeros(1600, dtype=np.float32))
                 self.emit(("model_ready", f"{config.WHISPER_MODEL} on {device} ({compute_type})"))
                 break
             except Exception as e:
@@ -73,20 +126,11 @@ class Transcriber:
         while True:
             audio, session_id, prompt_tail = self._jobs.get()
             try:
-                segments, _info = self.model.transcribe(
-                    audio,
-                    language=config.LANGUAGE,
-                    beam_size=config.BEAM_SIZE,
-                    initial_prompt=prompt_tail or None,
-                    vad_filter=False,  # VAD already happened upstream
-                    without_timestamps=True,
-                )
-                text = " ".join(s.text.strip() for s in segments).strip()
+                text = self.model.transcribe(audio, prompt_tail)
             except Exception as e:
                 text = ""
                 self.emit(("model_error", f"Transcription failed: {e}"))
             self.emit(("segment_text", session_id, text))
-
 
 if __name__ == "__main__":
     # Smoke test: python transcriber.py [path/to/16khz-mono.wav]

@@ -1,10 +1,13 @@
-# voiceToVibe configuration
+# voiceToText configuration
 
 # --- Transcription ---
 WHISPER_MODEL = "large-v3"   # any faster-whisper model name, e.g. "medium", "distil-large-v3"
 LANGUAGE = "en"
-DEVICE = "auto"              # "auto" tries cuda then falls back to cpu; or force "cuda"/"cpu"
-BEAM_SIZE = 5
+DEVICE = "auto"              # "auto": Metal (MLX) on Apple Silicon, else cuda; falls back to cpu.
+                             # Or force "cuda"/"cpu"
+BEAM_SIZE = 5                # faster-whisper only; mlx-whisper is greedy-only
+MLX_MODEL = None             # Apple Silicon: HF repo override, e.g. "mlx-community/whisper-large-v3-turbo".
+                             # None = "mlx-community/whisper-{WHISPER_MODEL}-mlx"
 
 # --- Audio ---
 SAMPLE_RATE = 16000          # what VAD and whisper consume; mic is resampled if needed

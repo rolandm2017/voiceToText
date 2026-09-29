@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-voiceToVibe is a local voice-to-text tool for prompting AI assistants by
+voiceToText is a local voice-to-text tool for prompting AI assistants by
 voice. The user records from a mic, speech is transcribed *live* (segment by
 segment at natural pauses) using faster-whisper large-v3 on the local GPU,
 and on Done the text is saved to `prompts/` and autocopied to the clipboard.
@@ -18,8 +18,10 @@ python audio.py                # 10s mic + VAD smoke test (no GUI, no model)
 python transcriber.py x.wav    # model-load + transcription smoke test
 ```
 
-The venv is Windows-side (`.venv/Scripts/python.exe`); Claude Code runs in
-WSL and cannot use the mic/GUI/CUDA — ask the user to run tests.
+On Windows the venv is Windows-side (`.venv/Scripts/python.exe`) and Claude
+Code runs in WSL without mic/GUI/CUDA — ask the user to run tests. On macOS
+(Apple Silicon) the venv is `.venv/bin/python` and `transcriber.py` can be
+smoke-tested directly (`say -o t.wav --data-format=LEI16@16000 "..."`).
 
 ## Dependencies
 
@@ -34,8 +36,9 @@ user's responsibility.
   GUI thread**, fed by an event queue drained via `root.after`
 - `audio.py` — mic capture (sounddevice) + Silero VAD segmentation; emits
   in-memory float32 segments at pause boundaries (worker thread)
-- `transcriber.py` — faster-whisper wrapper; background model load, job
-  queue (worker thread)
+- `transcriber.py` — Whisper wrapper: faster-whisper (CUDA/CPU) or
+  mlx-whisper (Metal, auto-selected on Apple Silicon); background model
+  load, job queue (worker thread)
 - `config.py` — all tunables (model, device, pause thresholds, paths)
 - `assets/silero_vad.onnx` — vendored Silero VAD v5 model (MIT)
 
