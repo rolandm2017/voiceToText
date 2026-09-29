@@ -55,8 +55,17 @@ uv pip install --python .venv/bin/python -e .
 .venv/bin/python main.py
 ```
 
-The first time you press Record, macOS asks whether your terminal may use the
-microphone. Allow it (System Settings → Privacy & Security → Microphone).
+Run from a terminal like that, macOS asks for mic permission *on behalf of the
+terminal*, which would give every terminal command your mic. Instead, build a
+small launcher app so the permission belongs to voiceToText alone:
+
+```bash
+./make_app.sh                 # creates dist/voiceToText.app
+open dist/voiceToText.app     # or double-click it / drag it to the Dock
+```
+
+The app runs this repo's `.venv` and `main.py`, so code edits need no rebuild.
+Rebuild only if you move the repo folder.
 
 First launch downloads the `large-v3` weights (~3 GB, one time) and then
 loads the model in the background — the window opens immediately and the
